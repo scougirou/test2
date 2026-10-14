@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,7 +25,7 @@ func TestMock_SearchAds(t *testing.T) {
 
 		got, err := m.SearchAds(ctx, req)
 
-		require.Error(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, want, got)
 	})
 
@@ -161,5 +162,91 @@ func TestMock_Rollback(t *testing.T) {
 		m.On("Rollback").Return(boom)
 
 		assert.ErrorIs(t, m.Rollback(), boom)
+	})
+}
+
+func TestMock_DeleteAd(t *testing.T) {
+	t.Run("returns nil on success", func(t *testing.T) {
+		m := mock.New(t)
+
+		m.On("DeleteAd", ctx, domain.AdID(42)).Return(nil)
+
+		require.NoError(t, m.DeleteAd(ctx, 42))
+	})
+
+	t.Run("returns ErrNotFound", func(t *testing.T) {
+		m := mock.New(t)
+
+		m.On("DeleteAd", ctx, domain.AdID(99)).Return(adsdao.ErrNotFound)
+
+		assert.ErrorIs(t, m.DeleteAd(ctx, 99), adsdao.ErrNotFound)
+	})
+}
+
+func TestMock_ListPublications(t *testing.T) {
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("returns configured publications", func(t *testing.T) {
+		m := mock.New(t)
+		want := []time.Time{since.Add(time.Hour), since.Add(2 * time.Hour)}
+
+		m.On("ListPublications", ctx, domain.UserID("user-1"), since).Return(want, nil)
+
+		got, err := m.ListPublications(ctx, "user-1", since)
+
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("returns nil slice on error", func(t *testing.T) {
+		m := mock.New(t)
+		boom := errors.New("db down")
+
+		m.On("ListPublications", ctx, domain.UserID("user-1"), since).Return(nil, boom)
+
+		got, err := m.ListPublications(ctx, "user-1", since)
+
+		assert.ErrorIs(t, err, boom)
+		assert.Nil(t, got)
+	})
+}
+
+func TestMock_RecordPublication(t *testing.T) {
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("returns nil on success", func(t *testing.T) {
+		m := mock.New(t)
+
+		m.On("RecordPublication", ctx, domain.UserID("user-1"), at).Return(nil)
+
+		require.NoError(t, m.RecordPublication(ctx, "user-1", at))
+	})
+
+	t.Run("returns configured error", func(t *testing.T) {
+		m := mock.New(t)
+		boom := errors.New("db down")
+
+		m.On("RecordPublication", ctx, domain.UserID("user-1"), at).Return(boom)
+
+		assert.ErrorIs(t, m.RecordPublication(ctx, "user-1", at), boom)
+	})
+}
+
+func TestMock_LockOwner(t *testing.T) {
+	t.Run("returns nil on success", func(t *testing.T) {
+		m := mock.New(t)
+
+		m.On("LockOwner", ctx, domain.UserID("user-1")).Return(nil)
+
+		require.NoError(t, m.LockOwner(ctx, "user-1"))
+	})
+
+	t.Run("returns configured error", func(t *testing.T) {
+		m := mock.New(t)
+		boom := errors.New("db down")
+
+		m.On("LockOwner", ctx, domain.UserID("user-1")).Return(boom)
+
+		assert.ErrorIs(t, m.LockOwner(ctx, "user-1"), boom)
 	})
 }

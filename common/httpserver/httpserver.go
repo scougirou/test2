@@ -20,6 +20,9 @@ func Run(ctx context.Context, addr string, handler http.Handler) error {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)

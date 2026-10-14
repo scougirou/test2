@@ -46,6 +46,7 @@ func TestHandlerListAds(t *testing.T) {
 		require.Len(t, got.Ads, 2)
 		assert.Equal(t, int64(1), got.Ads[0].ID)
 		assert.Equal(t, "bike", got.Ads[0].Title)
+		assert.Equal(t, int64(5000), got.Ads[0].Price)
 		assert.Equal(t, int64(5000), got.Ads[0].PriceCents)
 		assert.Equal(t, int64(2), got.Ads[1].ID)
 	})
@@ -84,6 +85,84 @@ func TestHandlerListAds(t *testing.T) {
 		assert.Equal(t, domain.UserID("user-3"), received.OwnerID)
 		assert.Equal(t, int64(1000), received.MinPriceCents)
 		assert.Equal(t, int64(50000), received.MaxPriceCents)
+	})
+
+	t.Run("forwards pagination to the usecase", func(t *testing.T) {
+		var received usecase.ListAdsRequest
+		srv := newListAdsServer(func(_ context.Context, req usecase.ListAdsRequest) ([]domain.Ad, error) {
+			received = req
+			return nil, nil
+		})
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/ads?limit=20&offset=40")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, 20, received.Limit)
+		assert.Equal(t, 40, received.Offset)
+	})
+
+	t.Run("accepts the price filters under their current names", func(t *testing.T) {
+		var received usecase.ListAdsRequest
+		srv := newListAdsServer(func(_ context.Context, req usecase.ListAdsRequest) ([]domain.Ad, error) {
+			received = req
+			return nil, nil
+		})
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/ads?min_price=1000&max_price=50000")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, int64(1000), received.MinPriceCents)
+		assert.Equal(t, int64(50000), received.MaxPriceCents)
+	})
+
+	t.Run("accepts both names of a price filter when they agree", func(t *testing.T) {
+		var received usecase.ListAdsRequest
+		srv := newListAdsServer(func(_ context.Context, req usecase.ListAdsRequest) ([]domain.Ad, error) {
+			received = req
+			return nil, nil
+		})
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/ads?min_price=1000&min_price_cents=1000")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, int64(1000), received.MinPriceCents)
+	})
+
+	t.Run("returns 400 on an invalid query", func(t *testing.T) {
+		for name, query := range map[string]string{
+			"both names of a price filter disagree": "min_price=1&min_price_cents=2",
+			"negative min price":                    "min_price=-1",
+			"negative max price":                    "max_price_cents=-1",
+			"limit is not a number":                 "limit=many",
+			"negative limit":                        "limit=-1",
+			"offset is not a number":                "offset=next",
+			"negative offset":                       "offset=-1",
+			"min_price is not a number":             "min_price=cheap",
+		} {
+			t.Run(name, func(t *testing.T) {
+				srv := newListAdsServer(func(_ context.Context, _ usecase.ListAdsRequest) ([]domain.Ad, error) {
+					t.Fatal("usecase should not be called")
+					return nil, nil
+				})
+				defer srv.Close()
+
+				resp, err := http.Get(srv.URL + "/ads?" + query)
+				require.NoError(t, err)
+				defer resp.Body.Close()
+
+				assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+				assert.NotEmpty(t, decodeError(t, resp))
+			})
+		}
 	})
 
 	t.Run("returns 400 when min_price_cents is not a number", func(t *testing.T) {

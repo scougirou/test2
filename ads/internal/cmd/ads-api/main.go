@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.mpi-internal.com/leboncoin/backend-hiring-assessment/ads/internal/cmd/ads-api/dao/postgres"
 	"github.mpi-internal.com/leboncoin/backend-hiring-assessment/ads/internal/cmd/ads-api/http"
+	"github.mpi-internal.com/leboncoin/backend-hiring-assessment/ads/internal/cmd/ads-api/identity"
 	"github.mpi-internal.com/leboncoin/backend-hiring-assessment/ads/internal/cmd/ads-api/usecase"
 	"github.mpi-internal.com/leboncoin/backend-hiring-assessment/common/httpserver"
 )
@@ -32,10 +34,14 @@ func run() error {
 		}
 	}()
 
+	users := identity.NewCachedClient(identity.NewClient(cfg.IdentityURL, cfg.IdentityTimeout))
+
 	router := http.NewRouter(http.Usecases{
-		CreateAd: usecase.NewCreateAdFunc(adDAO),
-		GetAd:    usecase.NewGetAdByIDFunc(adDAO),
-		ListAds:  usecase.NewListAdsFunc(adDAO),
+		CreateAd:  usecase.NewCreateAdFunc(adDAO, usecase.DefaultQuota, time.Now),
+		DeleteAd:  usecase.NewDeleteAdFunc(adDAO),
+		GetAd:     usecase.NewGetAdByIDFunc(adDAO, users),
+		ImportAds: usecase.NewImportAdsFunc(adDAO),
+		ListAds:   usecase.NewListAdsFunc(adDAO),
 	})
 
 	return httpserver.Run(ctx, cfg.HTTPAddr, router)

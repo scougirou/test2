@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestSearchAds(t *testing.T) {
 			AddRow(int64(1), "bike", int64(5000), "https://example.com/bike.jpg", "user-1", createdAt).
 			AddRow(int64(2), "scooter", int64(12000), "https://example.com/scooter.jpg", "user-2", createdAt)
 		mock.ExpectQuery("SELECT").
-			WithArgs("", int64(0), int64(0), "").
+			WithArgs("", int64(0), int64(0), "", 0, 0).
 			WillReturnRows(rows)
 
 		got, err := dao.SearchAds(ctx, adsdao.SearchAdsRequest{})
@@ -48,10 +49,29 @@ func TestSearchAds(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("forwards filters, limit and offset, and sorts newest first", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectQuery("ORDER BY created_at DESC, id DESC").
+			WithArgs("user-1", int64(100), int64(900), "bike", 20, 40).
+			WillReturnRows(sqlmock.NewRows(adCols))
+
+		_, err := dao.SearchAds(ctx, adsdao.SearchAdsRequest{
+			OwnerID:       "user-1",
+			MinPriceCents: 100,
+			MaxPriceCents: 900,
+			Title:         "bike",
+			Limit:         20,
+			Offset:        40,
+		})
+
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
 	t.Run("returns nil when no ads match", func(t *testing.T) {
 		dao, mock := newMockDAO(t)
 		mock.ExpectQuery("SELECT").
-			WithArgs("", int64(0), int64(0), "bike").
+			WithArgs("", int64(0), int64(0), "bike", 0, 0).
 			WillReturnRows(sqlmock.NewRows(adCols))
 
 		got, err := dao.SearchAds(ctx, adsdao.SearchAdsRequest{Title: "bike"})
@@ -65,7 +85,7 @@ func TestSearchAds(t *testing.T) {
 		dao, mock := newMockDAO(t)
 		boom := errors.New("db down")
 		mock.ExpectQuery("SELECT").
-			WithArgs("", int64(0), int64(0), "").
+			WithArgs("", int64(0), int64(0), "", 0, 0).
 			WillReturnError(boom)
 
 		_, err := dao.SearchAds(ctx, adsdao.SearchAdsRequest{})
@@ -277,5 +297,168 @@ func TestTransaction(t *testing.T) {
 
 		require.Error(t, dao.Commit())
 		require.Error(t, dao.Rollback())
+	})
+}
+
+func TestDeleteAd(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("deletes the ad", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectExec("DELETE FROM ads").
+			WithArgs(int64(42)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		require.NoError(t, dao.DeleteAd(ctx, 42))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns ErrNotFound when no row is deleted", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectExec("DELETE FROM ads").
+			WithArgs(int64(99)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err := dao.DeleteAd(ctx, 99)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, adsdao.ErrNotFound)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on failure", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		boom := errors.New("db down")
+		mock.ExpectExec("DELETE FROM ads").
+			WithArgs(int64(1)).
+			WillReturnError(boom)
+
+		err := dao.DeleteAd(ctx, 1)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, boom)
+		assert.NotErrorIs(t, err, adsdao.ErrNotFound)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestLockOwner(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("takes the lock inside the transaction", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectBegin()
+		mock.ExpectExec("pg_advisory_xact_lock").
+			WithArgs("user-1").
+			WillReturnResult(driver.ResultNoRows)
+		mock.ExpectRollback()
+
+		tx, err := dao.Begin(ctx)
+		require.NoError(t, err)
+
+		require.NoError(t, tx.LockOwner(ctx, "user-1"))
+		require.NoError(t, tx.Rollback())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when the lock cannot be taken", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		boom := errors.New("db down")
+		mock.ExpectBegin()
+		mock.ExpectExec("pg_advisory_xact_lock").
+			WithArgs("user-1").
+			WillReturnError(boom)
+		mock.ExpectRollback()
+
+		tx, err := dao.Begin(ctx)
+		require.NoError(t, err)
+
+		err = tx.LockOwner(ctx, "user-1")
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, boom)
+		require.NoError(t, tx.Rollback())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("refuses to lock outside a transaction", func(t *testing.T) {
+		dao, _ := newMockDAO(t)
+
+		require.Error(t, dao.LockOwner(ctx, "user-1"))
+	})
+}
+
+func TestListPublications(t *testing.T) {
+	ctx := context.Background()
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("returns the publications in order", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		first, second := since.Add(time.Hour), since.Add(2*time.Hour)
+		mock.ExpectQuery("FROM ad_publications").
+			WithArgs("user-1", since).
+			WillReturnRows(sqlmock.NewRows([]string{"published_at"}).AddRow(first).AddRow(second))
+
+		got, err := dao.ListPublications(ctx, "user-1", since)
+
+		require.NoError(t, err)
+		assert.Equal(t, []time.Time{first, second}, got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns nil when there is none", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectQuery("FROM ad_publications").
+			WithArgs("user-1", since).
+			WillReturnRows(sqlmock.NewRows([]string{"published_at"}))
+
+		got, err := dao.ListPublications(ctx, "user-1", since)
+
+		require.NoError(t, err)
+		assert.Nil(t, got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when query fails", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		boom := errors.New("db down")
+		mock.ExpectQuery("FROM ad_publications").
+			WithArgs("user-1", since).
+			WillReturnError(boom)
+
+		_, err := dao.ListPublications(ctx, "user-1", since)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, boom)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestRecordPublication(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("records the publication", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		mock.ExpectExec("INSERT INTO ad_publications").
+			WithArgs("user-1", at).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		require.NoError(t, dao.RecordPublication(ctx, "user-1", at))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error on failure", func(t *testing.T) {
+		dao, mock := newMockDAO(t)
+		boom := errors.New("db down")
+		mock.ExpectExec("INSERT INTO ad_publications").
+			WithArgs("user-1", at).
+			WillReturnError(boom)
+
+		err := dao.RecordPublication(ctx, "user-1", at)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, boom)
+		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

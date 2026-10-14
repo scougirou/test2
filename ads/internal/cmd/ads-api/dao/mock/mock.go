@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	adsdao "github.mpi-internal.com/leboncoin/backend-hiring-assessment/ads/internal/cmd/ads-api/dao"
@@ -50,6 +51,30 @@ func (m *Mock) CreateAd(ctx context.Context, req adsdao.CreateAdRequest) (domain
 	adID, _ := args.Get(0).(domain.AdID)
 
 	return adID, args.Error(1)
+}
+
+// DeleteAd returns the error set on the mock.
+func (m *Mock) DeleteAd(ctx context.Context, id domain.AdID) error {
+	return m.Called(ctx, id).Error(0)
+}
+
+// ListPublications returns the publication instants and the error set on the mock.
+func (m *Mock) ListPublications(ctx context.Context, ownerID domain.UserID, since time.Time) ([]time.Time, error) {
+	args := m.Called(ctx, ownerID, since)
+
+	publications, _ := args.Get(0).([]time.Time)
+
+	return publications, args.Error(1)
+}
+
+// RecordPublication returns the error set on the mock.
+func (m *Mock) RecordPublication(ctx context.Context, ownerID domain.UserID, at time.Time) error {
+	return m.Called(ctx, ownerID, at).Error(0)
+}
+
+// LockOwner returns the error set on the mock.
+func (m *Mock) LockOwner(ctx context.Context, ownerID domain.UserID) error {
+	return m.Called(ctx, ownerID).Error(0)
 }
 
 // Begin returns the mock itself as the transaction, so expectations stay set on a single object, and the error set on the mock.

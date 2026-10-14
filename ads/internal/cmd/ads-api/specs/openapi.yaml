@@ -2,7 +2,7 @@ openapi: "3.0.3"
 
 info:
   title: Ads API
-  description: Classified ads — list, read, and create ads.
+  description: Classified ads — list, read, create, import, and delete ads.
   version: "1.0.0"
 
 servers:
@@ -37,7 +37,7 @@ paths:
           schema:
             type: string
           example: "00000000-0000-0000-0000-000000000001"
-        - name: min_price_cents
+        - name: min_price
           in: query
           description: Inclusive lower bound on the price (in cents). 0 means no lower bound.
           schema:
@@ -45,7 +45,7 @@ paths:
             format: int64
             minimum: 0
           example: 5000
-        - name: max_price_cents
+        - name: max_price
           in: query
           description: Inclusive upper bound on the price (in cents). 0 means no upper bound.
           schema:
@@ -53,15 +53,50 @@ paths:
             format: int64
             minimum: 0
           example: 50000
+        - name: min_price_cents
+          in: query
+          deprecated: true
+          description: Former name of min_price. Sending both with different values is rejected.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: max_price_cents
+          in: query
+          deprecated: true
+          description: Former name of max_price. Sending both with different values is rejected.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          description: Number of ads to return. Defaults to 50 and is capped at 100.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Number of ads to skip, in the order of the response.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         "200":
-          description: List of matching ads (may be empty).
+          description: One page of the matching ads, newest first (may be empty).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListAdsResponse"
         "400":
-          description: Invalid query parameter (e.g. non-numeric price).
+          description: Invalid query parameter (e.g. non-numeric or negative price, conflicting names of the same filter).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
     post:
       summary: Create an ad
@@ -83,11 +118,72 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateAdResponse"
         "400":
-          description: Malformed or unknown request body field.
+          description: Malformed body, unknown field, missing price, or rejected ad (empty title or photo_url, negative price).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           description: Missing Authorization header.
+        "413":
+          description: Request body larger than 1 MiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: The user already published 5 ads over the last 24 hours (rolling window). Deleting an ad does not give quota back.
+          headers:
+            Retry-After:
+              description: Number of seconds to wait before the user can publish again.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Unexpected server error.
+
+  /ads/import:
+    post:
+      summary: Import several ads
+      description: >
+        Creates all the ads or none of them: when the call fails, nothing was created and it can safely be run again.
+        The publication quota does not apply.
+      operationId: importAds
+      tags: [ads]
+      security:
+        - userID: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportAdsBody"
+      responses:
+        "201":
+          description: Ads created. The identifiers are in the order of the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportAdsResponse"
+        "400":
+          description: Malformed body, unknown field, or rejected ad. The message names the offending ad, e.g. ads[3].
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing Authorization header.
+        "413":
+          description: Request body larger than 8 MiB, or more than 1000 ads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Unexpected server error. Nothing was created.
 
   /ads/{adID}:
     get:
@@ -104,13 +200,43 @@ paths:
           example: 1
       responses:
         "200":
-          description: The requested ad.
+          description: >
+            The requested ad. The username comes from the user service and is left out when that service cannot provide it.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Ad"
         "400":
           description: adID is not a valid integer.
+        "404":
+          description: No ad exists with this ID.
+        "500":
+          description: Unexpected server error.
+
+    delete:
+      summary: Delete an ad
+      description: Only the owner of an ad can delete it.
+      operationId: deleteAd
+      tags: [ads]
+      security:
+        - userID: []
+      parameters:
+        - name: adID
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          example: 1
+      responses:
+        "204":
+          description: Ad deleted.
+        "400":
+          description: adID is not a valid integer.
+        "401":
+          description: Missing Authorization header.
+        "403":
+          description: The ad belongs to another user.
         "404":
           description: No ad exists with this ID.
         "500":
@@ -127,7 +253,7 @@ components:
   schemas:
     Ad:
       type: object
-      required: [id, title, price_cents, photo_url, user_id, created_at]
+      required: [id, title, price, price_cents, photo_url, user_id, created_at]
       properties:
         id:
           type: integer
@@ -136,10 +262,16 @@ components:
         title:
           type: string
           example: mountain bike
-        price_cents:
+        price:
           type: integer
           format: int64
           description: Price in euro cents.
+          example: 15000
+        price_cents:
+          type: integer
+          format: int64
+          deprecated: true
+          description: Former name of price, with the same value. It will be removed once every client reads price.
           example: 15000
         photo_url:
           type: string
@@ -147,6 +279,10 @@ components:
         user_id:
           type: string
           example: "00000000-0000-0000-0000-000000000001"
+        username:
+          type: string
+          description: Nickname of the owner. Only returned when getting a single ad, and only when the user service provides it.
+          example: alice
         created_at:
           type: string
           format: date-time
@@ -163,18 +299,30 @@ components:
 
     CreateAdBody:
       type: object
-      required: [title, price_cents, photo_url]
+      required: [title, photo_url]
+      anyOf:
+        - required: [price]
+        - required: [price_cents]
       properties:
         title:
           type: string
+          minLength: 1
           example: mountain bike
+        price:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Price in euro cents.
+          example: 15000
         price_cents:
           type: integer
           format: int64
-          description: Price in euro cents.
-          example: 15000
+          minimum: 0
+          deprecated: true
+          description: Former name of price. Sending both with different values is rejected.
         photo_url:
           type: string
+          minLength: 1
           example: https://example.com/bike.jpg
 
     CreateAdResponse:
@@ -186,3 +334,32 @@ components:
           format: int64
           description: Generated identifier of the new ad.
           example: 42
+
+    ImportAdsBody:
+      type: object
+      required: [ads]
+      properties:
+        ads:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/CreateAdBody"
+
+    ImportAdsResponse:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          description: Identifiers of the created ads, in the order of the request.
+          items:
+            type: integer
+            format: int64
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "invalid ad: title must not be empty"

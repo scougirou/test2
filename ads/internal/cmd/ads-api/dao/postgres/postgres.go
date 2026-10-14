@@ -107,7 +107,7 @@ func (d *DAO) Rollback() error {
 	return nil
 }
 
-// SearchAds returns all ads matching the filters.
+// SearchAds returns the ads matching the filters, newest first.
 func (d *DAO) SearchAds(ctx context.Context, req adsdao.SearchAdsRequest) ([]domain.Ad, error) {
 	const query = `
 		SELECT ` + adColumns + `
@@ -115,13 +115,18 @@ func (d *DAO) SearchAds(ctx context.Context, req adsdao.SearchAdsRequest) ([]dom
 		WHERE ($1 = '' OR user_id::text = $1)
 		  AND ($2 = 0 OR price_cents >= $2)
 		  AND ($3 = 0 OR price_cents <= $3)
-		  AND ($4 = '' OR title ILIKE '%' || $4 || '%')`
+		  AND ($4 = '' OR title ILIKE '%' || $4 || '%')
+		ORDER BY created_at DESC, id DESC
+		LIMIT NULLIF($5::bigint, 0)
+		OFFSET $6::bigint`
 
 	rows, err := d.runner().QueryContext(ctx, query,
 		req.OwnerID,
 		req.MinPriceCents,
 		req.MaxPriceCents,
 		req.Title,
+		req.Limit,
+		req.Offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to search ads: %w", err)
@@ -176,6 +181,84 @@ func (d *DAO) CreateAd(ctx context.Context, req adsdao.CreateAdRequest) (domain.
 	}
 
 	return id, nil
+}
+
+// DeleteAd removes an ad, or returns dao.ErrNotFound when it does not exist.
+func (d *DAO) DeleteAd(ctx context.Context, id domain.AdID) error {
+	const query = `DELETE FROM ads WHERE id = $1`
+
+	res, err := d.runner().ExecContext(ctx, query, int64(id))
+	if err != nil {
+		return fmt.Errorf("unable to delete ad: %w", err)
+	}
+
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("unable to count deleted ads: %w", err)
+	}
+
+	if deleted == 0 {
+		return adsdao.ErrNotFound
+	}
+
+	return nil
+}
+
+// LockOwner blocks until no other transaction holds the owner's lock, then holds it until the transaction ends.
+func (d *DAO) LockOwner(ctx context.Context, ownerID domain.UserID) error {
+	if d.tx == nil {
+		return errors.New("unable to lock an owner outside a transaction")
+	}
+
+	const query = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`
+
+	if _, err := d.tx.ExecContext(ctx, query, string(ownerID)); err != nil {
+		return fmt.Errorf("unable to lock owner: %w", err)
+	}
+
+	return nil
+}
+
+// ListPublications returns, oldest first, the instants at which the owner published an ad since the given instant.
+func (d *DAO) ListPublications(ctx context.Context, ownerID domain.UserID, since time.Time) ([]time.Time, error) {
+	const query = `
+		SELECT published_at
+		FROM ad_publications
+		WHERE user_id = $1::uuid AND published_at > $2
+		ORDER BY published_at`
+
+	rows, err := d.runner().QueryContext(ctx, query, string(ownerID), since)
+	if err != nil {
+		return nil, fmt.Errorf("unable to list publications: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var publications []time.Time
+	for rows.Next() {
+		var publishedAt time.Time
+		if err := rows.Scan(&publishedAt); err != nil {
+			return nil, fmt.Errorf("unable to scan publication: %w", err)
+		}
+
+		publications = append(publications, publishedAt)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("unable to read publications: %w", err)
+	}
+
+	return publications, nil
+}
+
+// RecordPublication records that the owner published an ad at the given instant.
+func (d *DAO) RecordPublication(ctx context.Context, ownerID domain.UserID, at time.Time) error {
+	const query = `INSERT INTO ad_publications (user_id, published_at) VALUES ($1::uuid, $2)`
+
+	if _, err := d.runner().ExecContext(ctx, query, string(ownerID), at); err != nil {
+		return fmt.Errorf("unable to record publication: %w", err)
+	}
+
+	return nil
 }
 
 func scanAd(row *sql.Row) (domain.Ad, error) {
